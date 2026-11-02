@@ -177,4 +177,5 @@ fixture test membuktikan model Muse akan selalu mematuhi protokol emulasi.
 Untuk reasoning/provider state dan batas context/output, lihat
 [MODEL_CONTRACT.md](MODEL_CONTRACT.md). Output terpotong mempertahankan `length`
 atau Responses `incomplete`, dengan tool yang belum lengkap tidak dapat dieksekusi.
-Budget pada upstream yang belum mendukungnya ditolak sebelum generasi.
+Default policy best-effort meneruskan budget/replay yang belum terverifikasi.
+Set `BRIDGE_CAPABILITY_POLICY=strict` bila ingin menolak kondisi itu sebelum generasi.

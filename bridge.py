@@ -40,6 +40,7 @@ class Config:
     response_ttl: float = 3600
     response_capacity: int = 128
     model_profile: str | None = None
+    capability_policy: str = 'best_effort'
 
     def __post_init__(self):
         if min(len(self.user_key), len(self.worker_key)) < 32:
@@ -54,6 +55,8 @@ class Config:
             raise ValueError('BRIDGE_BACKEND must be queue or muse2api')
         if self.tool_mode not in ('emulate', 'native', 'disabled'):
             raise ValueError('BRIDGE_TOOL_MODE must be emulate, native, or disabled')
+        if self.capability_policy not in ('best_effort', 'strict'):
+            raise ValueError('BRIDGE_CAPABILITY_POLICY must be best_effort or strict')
         if not math.isfinite(self.response_ttl) or self.response_ttl <= 0 or self.response_capacity < 1:
             raise ValueError('Response retention TTL and capacity must be positive')
         self.contract = ModelContract.load(self.model_profile, self.upstream_model)
@@ -171,7 +174,7 @@ class Server(ThreadingHTTPServer):
     def complete(self, request):
         wire, context = prepare_request(request, self.config.tool_mode)
         if self.config.backend == 'queue':
-            wire, budget = self.config.contract.prepare(request, wire)
+            wire, budget = self.config.contract.prepare(request, wire, policy=self.config.capability_policy)
             raw = self.queue.wait(self.queue.enqueue(wire))
         else:
             if not self.slots.acquire(blocking=False):
@@ -182,7 +185,7 @@ class Server(ThreadingHTTPServer):
                     result = muse_backend.request_json(cfg.upstream_url, cfg.upstream_key, cfg.contract.count_tokens_path,
                                                        muse_backend.chat_payload(cfg.upstream_model, payload), timeout=cfg.timeout)
                     return result.get('input_tokens') if isinstance(result, dict) else None
-                wire, budget = cfg.contract.prepare(request, wire, counter=counter)
+                wire, budget = cfg.contract.prepare(request, wire, counter=counter, policy=cfg.capability_policy)
                 raw = muse_backend.complete(cfg.upstream_url, cfg.upstream_key, cfg.upstream_model, wire, cfg.timeout)
             except muse_backend.BackendError as e:
                 raise APIError(e.status, e.message, e.code) from None
@@ -193,7 +196,7 @@ class Server(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'OsasBridge/0.4'
+    server_version = 'OsasBridge/0.4.1'
 
     def log_message(self, format, *args):
         # Do not log URLs, bodies, auth headers, or worker replies.
@@ -249,6 +252,7 @@ class Handler(BaseHTTPRequestHandler):
                 'structured_output': self.server.config.tool_mode != 'disabled', 'tool_execution': 'client',
                 'streaming': 'buffered_sse', 'usage': 'unavailable', 'multimodal': False,
                 'reasoning_transport': 'json_passthrough',
+                'capability_policy': self.server.config.capability_policy,
                 'model_contract': self.server.config.contract.metadata(),
                 'max_request_bytes': MAX_BODY, 'max_messages': 256,
                 'response_retention_seconds': self.server.config.response_ttl})
@@ -375,7 +379,8 @@ def main():
                         tool_mode=os.getenv('BRIDGE_TOOL_MODE', 'emulate'),
                         response_ttl=float(os.getenv('BRIDGE_RESPONSE_TTL', '3600')),
                         response_capacity=int(os.getenv('BRIDGE_RESPONSE_CAPACITY', '128')),
-                        model_profile=os.getenv('BRIDGE_MODEL_PROFILE') or None)
+                        model_profile=os.getenv('BRIDGE_MODEL_PROFILE') or None,
+                        capability_policy=os.getenv('BRIDGE_CAPABILITY_POLICY', 'best_effort'))
         server = Server((args.host, args.port), config)
     except (ValueError, OSError) as e:
         parser.exit(1, f'Startup failed: {e}\n')

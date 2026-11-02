@@ -62,42 +62,51 @@ class ModelContract:
                 'reasoning_replay': self.reasoning_replay,
                 'profile_verified_by_operator': self.verified, 'verification_source': self.source}
 
-    def prepare(self, request, wire, counter=None):
-        # Metadata never becomes prompt text; refuse silent loss on known-unknown adapters.
+    def prepare(self, request, wire, counter=None, policy='best_effort'):
+        if policy not in ('best_effort', 'strict'):
+            raise ValueError('Capability policy must be best_effort or strict')
+        strict = policy == 'strict'
+        # Best-effort forwards unknown capabilities without advertising support.
+        # Neither policy turns opaque metadata into prompt text.
         if any(any(v is not None and v != '' and v != {} and v != [] for v in replay_fields(m).values())
-               for m in request['messages']) and not self.reasoning_replay:
+               for m in request['messages']) and not self.reasoning_replay and strict:
             raise APIError(422, 'Upstream reasoning replay is not verified; configure a verified model profile before replaying state',
                            'reasoning_replay_unsupported')
         max_old, max_new = request.get('max_tokens'), request.get('max_completion_tokens')
         if max_old is not None and max_new is not None and max_old != max_new:
             raise APIError(400, 'max_tokens and max_completion_tokens must agree when both are supplied')
         budget = max_new if max_new is not None else max_old
-        if budget is not None and not self.output_parameter:
+        if budget is not None and not self.output_parameter and strict:
             raise APIError(422, 'This upstream does not have verified output-token enforcement', 'output_limit_unsupported')
         if budget is not None and self.max_output_tokens is not None and budget > self.max_output_tokens:
             raise APIError(400, 'Requested output budget exceeds the verified model output limit', 'output_limit_exceeded')
         result = copy.deepcopy(wire)
-        result.pop('max_tokens', None)
-        result.pop('max_completion_tokens', None)
         if self.output_parameter:
+            result.pop('max_tokens', None)
+            result.pop('max_completion_tokens', None)
             budget = budget if budget is not None else self.max_output_tokens
             result[self.output_parameter] = budget
         if self.context_window is not None:
             if self.count_tokens_path:
                 if counter is None:
-                    raise APIError(422, 'Exact context counting is unavailable for this backend', 'context_count_unavailable')
-                # Count the actual final prompt, tools, and provider state sent upstream.
-                count = counter(result)
-                if isinstance(count, bool) or not isinstance(count, int) or count < 0:
-                    raise APIError(502, 'Upstream token-count endpoint returned an invalid count', 'invalid_token_count')
-                reserve = budget if budget is not None else self.max_output_tokens
-                if reserve is None:
-                    raise APIError(422, 'A verified output reserve is required for context accounting', 'context_count_unavailable')
-                if count + reserve > self.context_window:
-                    raise APIError(400, 'Input plus requested output exceeds the verified context window', 'context_length_exceeded')
-            elif not self.context_enforced_upstream:
+                    if strict:
+                        raise APIError(422, 'Exact context counting is unavailable for this backend', 'context_count_unavailable')
+                else:
+                    # Count the actual final prompt, tools, and provider state sent upstream.
+                    count = counter(result)
+                    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                        raise APIError(502, 'Upstream token-count endpoint returned an invalid count', 'invalid_token_count')
+                    reserve = budget if budget is not None else self.max_output_tokens
+                    if reserve is None:
+                        if strict:
+                            raise APIError(422, 'A verified output reserve is required for context accounting', 'context_count_unavailable')
+                    elif count + reserve > self.context_window:
+                        raise APIError(400, 'Input plus requested output exceeds the verified context window', 'context_length_exceeded')
+            elif not self.context_enforced_upstream and strict:
                 raise APIError(422, 'Configured context size has no verified enforcement/counting contract', 'context_count_unavailable')
-        return result, budget
+        # Only check the returned count against a declared enforcement contract.
+        # An unverified budget is a forwarded hint, not a promise from the bridge.
+        return result, budget if self.output_parameter else None
 
     @staticmethod
     def check_result(raw, budget):

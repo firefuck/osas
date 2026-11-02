@@ -144,6 +144,7 @@ class ReplayLimitTests(unittest.TestCase):
 
     def test_unknown_contract_rejects_replay_and_budget_without_inference(self):
         self.config.contract = ModelContract()
+        self.config.capability_policy = 'strict'
         for body, code in [({'model': 'muse', 'messages': [{'role': 'user', 'content': 'hello'}], 'max_tokens': 5}, 'output_limit_unsupported'),
                            ({'model': 'muse', 'messages': [{'role': 'assistant', 'content': 'old', **REPLAY},
                              {'role': 'user', 'content': 'continue'}]}, 'reasoning_replay_unsupported')]:
@@ -153,6 +154,40 @@ class ReplayLimitTests(unittest.TestCase):
         self.assertEqual(self.upstream.requests, [])
         _, text = self.call('/v1/models/muse')
         self.assertIsNone(json.loads(text)['context_window'])
+
+    def test_default_best_effort_forwards_unknown_replay_and_budgets(self):
+        self.config.contract = ModelContract()
+        self.assertEqual(self.config.capability_policy, 'best_effort')
+        self.upstream.result['usage'] = {'completion_tokens': 100}
+        for limits in ({'max_tokens': 5}, {'max_completion_tokens': 5},
+                       {'max_tokens': 5, 'max_completion_tokens': 5}):
+            body = {'model': 'muse', 'messages': [{'role': 'assistant', 'content': 'old', **copy.deepcopy(REPLAY)},
+                    {'role': 'user', 'content': 'continue'}], **limits}
+            status, text = self.call(body=body)
+            self.assertEqual(status, 200, text)
+            for name, value in limits.items():
+                self.assertEqual(self.upstream.requests[-1][name], value)
+            for key, value in REPLAY.items():
+                self.assertEqual(self.upstream.requests[-1]['messages'][0][key], value)
+                self.assertEqual(json.loads(text)['choices'][0]['message'][key], value)
+            self.assertEqual(json.loads(text)['choices'][0]['finish_reason'], 'stop')
+        _, text = self.call('/v1/capabilities')
+        capabilities = json.loads(text)
+        self.assertEqual(capabilities['capability_policy'], 'best_effort')
+        self.assertFalse(capabilities['model_contract']['reasoning_replay'])
+        self.assertFalse(capabilities['model_contract']['profile_verified_by_operator'])
+        self.assertIsNone(capabilities['model_contract']['context_window'])
+
+    def test_best_effort_skips_unavailable_counter_but_strict_rejects(self):
+        contract = self.config.contract
+        request = validate_request({'model': 'muse', 'messages': [{'role': 'user', 'content': 'hello'}]})
+        wire, _ = prepare_request(request, 'native')
+        result, budget = contract.prepare(request, wire, counter=None, policy='best_effort')
+        self.assertEqual(result['max_tokens'], 32)
+        self.assertEqual(budget, 32)
+        with self.assertRaises(APIError) as error:
+            contract.prepare(request, wire, counter=None, policy='strict')
+        self.assertEqual(error.exception.code, 'context_count_unavailable')
 
     def test_exact_context_count_and_output_alias_mapping(self):
         body = {'model': 'muse', 'messages': [{'role': 'user', 'content': 'hello'}], 'max_completion_tokens': 12}

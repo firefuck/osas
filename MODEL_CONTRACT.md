@@ -3,7 +3,22 @@
 Perbaikan ini menangani poin 4/5 pada sisi bridge. Kapabilitas model asli tetap
 harus tersedia di upstream. Muse2API web adapter yang dipatok belum membuktikan
 reasoning replay, context window tertentu, atau enforcement output token; mode
-default tidak mengiklankan angka context dan tidak diam-diam mengabaikan budget.
+default tidak mengiklankan angka context. Mode default best-effort meneruskan
+request meskipun dukungan replay/budget belum terverifikasi.
+
+## Pilihan best-effort atau strict
+
+`BRIDGE_CAPABILITY_POLICY=best_effort` adalah default, termasuk saat variabel
+belum ada di environment instalasi lama. Replay dan parameter budget tanpa
+kontrak terverifikasi diteruskan tanpa 422. Nama/nilai parameter budget asli
+dipertahankan bila parameter upstream yang benar belum diketahui. Ini tidak
+mengubah metadata kapabilitas menjadi verified dan tidak menjamin upstream
+akan menggunakan state atau menghormati budget.
+
+Set `BRIDGE_CAPABILITY_POLICY=strict` untuk mengembalikan guard 422 yang dijelaskan
+di bawah. Validasi input, batas model yang benar-benar terverifikasi, context
+overflow yang diketahui, serta error counter/provider aktual tetap berlaku di
+kedua mode. `/v1/capabilities` melaporkan policy yang sedang aktif.
 
 ## Reasoning dan provider state
 
@@ -28,7 +43,7 @@ item asli bila upstream mengirim bentuk itu. Provider/adapter yang digunakan
 harus mendukung representasi replay tersebut; dukungan format bridge bukan bukti
 bahwa Muse web agent mengonsumsi state itu.
 
-Jika histori berisi state replay nonempty tetapi upstream belum dinyatakan
+Dalam mode strict, jika histori berisi state replay nonempty tetapi upstream belum dinyatakan
 mendukungnya melalui profil terverifikasi, request ditolak dengan
 `422 reasoning_replay_unsupported` **sebelum generasi**. Ini mencegah state
 kelihatan berhasil dikirim padahal dibuang adapter. Field kosong/null tetap
@@ -78,9 +93,10 @@ profil, `context_window`/`max_output_tokens` adalah null. Tidak ada angka 1M def
 
 - `max_tokens` dan `max_completion_tokens` harus sama jika dikirim bersamaan.
   Bridge memetakan alias ke parameter yang dinyatakan ditegakkan upstream.
-- Tanpa output contract, request yang meminta budget ditolak dengan
-  `422 output_limit_unsupported`, bukan diterima lalu diabaikan. Request biasa
-  tanpa budget masih boleh berjalan, dengan limit tidak diketahui.
+- Tanpa output contract, mode strict menolak request budget dengan
+  `422 output_limit_unsupported`. Mode best-effort meneruskan budget sebagai
+  petunjuk yang belum dijamin, tanpa menganggap usage melebihi petunjuk itu
+  sebagai pelanggaran kontrak yang sebenarnya tidak ada.
 - Budget yang melampaui batas model ditolak `400 output_limit_exceeded` sebelum
   generasi. Jika contract ada dan client tidak memberi budget, batas model
   dikirim eksplisit sebagai budget default.
@@ -99,6 +115,9 @@ profil, `context_window`/`max_output_tokens` adalah null. Tidak ada angka 1M def
 - Sebagai alternatif, gunakan `context_enforced_upstream:true` hanya bila upstream
   benar-benar memeriksa total context sendiri. Tanpa counter atau kontrak itu,
   profil context yang diisi tidak boleh diperlakukan sebagai enforcement.
+  Jika counter/reserve tidak tersedia untuk backend tersebut, best-effort
+  melewati guard prasyarat 422; strict menolaknya. Counter yang dikonfigurasi
+  tetapi mengembalikan data invalid/error tetap merupakan kegagalan aktual.
 - Jika usage upstream yang otoritatif menunjukkan completion melampaui budget,
   hasil ditolak sebagai `502 upstream_output_limit_violation`. Pengecekan ini
   tidak mengubah placeholder nol dari web adapter menjadi metering yang akurat.
