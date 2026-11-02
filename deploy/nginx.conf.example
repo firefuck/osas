@@ -20,7 +20,7 @@ server {
     client_body_timeout 15s;
 
     # Chat/models are included for 9Router on a separate VPS.
-    location ~ ^/(worker/(claim|answer)|health|v1/(models|chat/completions))$ {
+    location ~ ^/(worker/(claim|answer)|health|v1/(models(/muse)?|capabilities|chat/completions|responses(/resp_[a-f0-9]+)?))$ {
         limit_req zone=osas_worker burst=10 nodelay;
         limit_req_status 429;
         limit_conn osas_connections 16;

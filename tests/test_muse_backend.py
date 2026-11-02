@@ -49,7 +49,7 @@ class MuseBackendTests(unittest.TestCase):
         self.user_key, self.worker_key, self.upstream_key = 'u' * 40, 'w' * 40, 'a' * 40
         self.upstream_url = f'http://127.0.0.1:{self.adapter.server_port}/v1'
         self.bridge = Server(('127.0.0.1', 0), Config(
-            self.user_key, self.worker_key, backend='muse2api', upstream_url=self.upstream_url,
+            self.user_key, self.worker_key, db=self.tmp.name + '/bridge.db', backend='muse2api', upstream_url=self.upstream_url,
             upstream_key=self.upstream_key, timeout=2, max_pending=1))
         self.threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in (self.adapter, self.bridge)]
         for thread in self.threads:
@@ -122,6 +122,14 @@ class MuseBackendTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Config(self.user_key, self.worker_key, backend='muse2api', upstream_key='x',
                    upstream_url='http://remote.example.com/v1')
+
+    def test_native_refusal_is_preserved(self):
+        self.bridge.config.tool_mode = 'native'
+        self.adapter.reply = {'choices': [{'message': {'role': 'assistant', 'content': None,
+            'refusal': 'Cannot complete that request'}, 'finish_reason': 'stop'}]}
+        status, raw = self.request()
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(json.loads(raw)['choices'][0]['message']['refusal'], 'Cannot complete that request')
 
     def test_proxy_tool_updates_adapter_account_and_can_remove_proxy(self):
         path = Path(self.tmp.name) / 'proxy.json'

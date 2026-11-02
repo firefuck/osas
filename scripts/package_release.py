@@ -5,13 +5,15 @@ import tarfile
 from pathlib import Path
 
 FILES = (
-    '.env.example', 'worker.env.example', '.gitignore', 'README.md', 'MUSE_WORKER.md',
+    '.env.example', 'worker.env.example', '.gitignore', 'README.md', 'MUSE_WORKER.md', 'TOOL_CALLING.md',
+    'requirements.txt', 'requirements-dev.txt', 'chat_protocol.py', 'responses_api.py',
     'bridge.py', 'muse_backend.py', 'worker.py', 'scripts/init_env.py', 'scripts/package_release.py',
     'scripts/configure_muse_proxy.py',
     'deploy/install-ubuntu.sh', 'deploy/osas-bridge.service',
     'deploy/UBUNTU22.md', 'deploy/Caddyfile.example', 'deploy/nginx.conf.example',
     'deploy/REMOTE_MUSE.md', 'deploy/muse2api.compose.yml', 'deploy/proxy.example.json',
     'tests/test_bridge.py', 'tests/test_worker_proxy.py', 'tests/test_muse_backend.py',
+    'tests/test_tools.py', 'tests/test_agent_api.py', 'tests/tools_fixture.py', 'examples/agent_loop.py',
 )
 
 

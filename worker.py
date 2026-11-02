@@ -74,11 +74,13 @@ def claim(base_url, key, output, wait=0, proxy_url=None):
             Path(output).unlink(missing_ok=True)
 
 
-def answer(base_url, key, job_file, text_file=None, error=None, proxy_url=None):
+def answer(base_url, key, job_file, text_file=None, error=None, proxy_url=None, response_file=None):
     job = json.loads(Path(job_file).read_text())
     body = {'id': job['id'], 'lease_token': job['lease_token']}
     if error is not None:
         body['error'] = error
+    elif response_file is not None:
+        body['response'] = json.loads(Path(response_file).read_text())
     else:
         body['content'] = Path(text_file).read_text()
     result = call(base_url, key, '/worker/answer', body, proxy_url=proxy_url)
@@ -99,6 +101,7 @@ def main():
     p.add_argument('--job-file', required=True)
     group = p.add_mutually_exclusive_group(required=True)
     group.add_argument('--text-file')
+    group.add_argument('--response-file', help='JSON file with message and finish_reason, for native tools')
     group.add_argument('--error', help='Mark the request failed; do not include secrets')
     args = parser.parse_args()
     key = os.getenv('BRIDGE_WORKER_KEY', '')
@@ -108,7 +111,8 @@ def main():
             job = claim(args.base_url, key, args.output, args.wait, proxy_url=proxy_url)
             print('Job saved. Read messages, generate a reply in Muse, then run answer.' if job else 'No pending jobs.')
         else:
-            answer(args.base_url, key, args.job_file, args.text_file, args.error, proxy_url=proxy_url)
+            answer(args.base_url, key, args.job_file, args.text_file, args.error, proxy_url=proxy_url,
+                   response_file=args.response_file)
             print('Answer submitted; private job file removed.')
     except (OSError, ValueError, KeyError, RuntimeError) as e:
         parser.exit(1, f'Worker failed: {e}\n')

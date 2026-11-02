@@ -1,4 +1,4 @@
-"""Muse job bridge. Python 3.10+, standard library only; no Muse API assumed."""
+"""Muse bridge with validated function calling and OpenAI text/Responses APIs."""
 import argparse
 import hmac
 import json
@@ -16,14 +16,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import muse_backend
+import responses_api
+from chat_protocol import APIError, validate_request, prepare_request, normalize_completion, chat_chunks, loads
 
 LOG = logging.getLogger('osas')
 MAX_BODY = 1024 * 1024
-
-
-class APIError(Exception):
-    def __init__(self, status, message, code='invalid_request'):
-        self.status, self.message, self.code = status, message, code
 
 
 @dataclass
@@ -38,6 +35,9 @@ class Config:
     upstream_url: str = 'http://127.0.0.1:18610/v1'
     upstream_key: str = ''
     upstream_model: str = 'muse-spark'
+    tool_mode: str = 'emulate'
+    response_ttl: float = 3600
+    response_capacity: int = 128
 
     def __post_init__(self):
         if min(len(self.user_key), len(self.worker_key)) < 32:
@@ -50,6 +50,10 @@ class Config:
             raise ValueError('max_pending must be positive')
         if self.backend not in ('queue', 'muse2api'):
             raise ValueError('BRIDGE_BACKEND must be queue or muse2api')
+        if self.tool_mode not in ('emulate', 'native', 'disabled'):
+            raise ValueError('BRIDGE_TOOL_MODE must be emulate, native, or disabled')
+        if not math.isfinite(self.response_ttl) or self.response_ttl <= 0 or self.response_capacity < 1:
+            raise ValueError('Response retention TTL and capacity must be positive')
         if self.backend == 'muse2api':
             self.upstream_url = muse_backend.validate_url(self.upstream_url)
             if not self.upstream_key or not self.upstream_model:
@@ -71,6 +75,8 @@ class Queue:
                 deadline REAL NOT NULL, status TEXT NOT NULL,
                 lease_token TEXT, lease_until REAL, answer TEXT, error TEXT)''')
             db.execute('CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status, created)')
+            if 'answer_format' not in {r[1] for r in db.execute('PRAGMA table_info(jobs)')}:
+                db.execute("ALTER TABLE jobs ADD COLUMN answer_format TEXT NOT NULL DEFAULT 'text'")
 
     @contextmanager
     def connect(self):
@@ -118,7 +124,7 @@ class Queue:
             return dict(id=row['id'], request=json.loads(row['request']),
                         lease_token=token, lease_until=until, deadline=row['deadline'])
 
-    def answer(self, job_id, token, content=None, error=None):
+    def answer(self, job_id, token, content=None, error=None, response=None):
         now = time.time()
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -128,8 +134,9 @@ class Queue:
             if (row['status'] != 'leased' or row['deadline'] <= now or
                     row['lease_until'] <= now or not hmac.compare_digest(row['lease_token'], token)):
                 raise APIError(409, 'Job expired, completed, or lease is no longer valid', 'invalid_lease')
-            db.execute("UPDATE jobs SET status=?,answer=?,error=?,request='{}',lease_token=NULL WHERE id=?",
-                       ('failed' if error is not None else 'done', content, error, job_id))
+            db.execute("UPDATE jobs SET status=?,answer=?,error=?,request='{}',lease_token=NULL,answer_format=? WHERE id=?",
+                       ('failed' if error is not None else 'done', json.dumps(response) if response is not None else content,
+                        error, 'response' if response is not None else 'text', job_id))
 
     def wait(self, job_id):
         while True:
@@ -142,43 +149,8 @@ class Queue:
                     db.execute('DELETE FROM jobs WHERE id=?', (job_id,))
                     if row['status'] == 'failed':
                         raise APIError(502, 'Muse worker could not complete this request', 'worker_error')
-                    return row['answer']
+                    return json.loads(row['answer']) if row['answer_format'] == 'response' else row['answer']
             time.sleep(0.1)
-
-
-def validate_request(body):
-    if body.get('model') != 'muse':
-        raise APIError(404, 'Only model muse is available', 'model_not_found')
-    if not isinstance(body.get('stream', False), bool):
-        raise APIError(400, 'stream must be boolean')
-    if body.get('n', 1) != 1:
-        raise APIError(400, 'Only n=1 is supported')
-    for name in ('tools', 'tool_choice', 'functions', 'function_call', 'response_format', 'logprobs'):
-        if name in body:
-            raise APIError(400, f'{name} is not supported by this text bridge', 'unsupported_feature')
-    messages = body.get('messages')
-    if not isinstance(messages, list) or not messages or len(messages) > 256:
-        raise APIError(400, 'messages must contain 1 to 256 messages')
-    normalized = []
-    for message in messages:
-        if not isinstance(message, dict) or message.get('role') not in ('system', 'developer', 'user', 'assistant'):
-            raise APIError(400, 'Unsupported message role')
-        content = message.get('content')
-        if isinstance(content, list):
-            if any(not isinstance(p, dict) or p.get('type') != 'text' or not isinstance(p.get('text'), str) for p in content):
-                raise APIError(400, 'Only text content parts are supported')
-            content = '\n'.join(p['text'] for p in content)
-        if not isinstance(content, str):
-            raise APIError(400, 'Message content must be text')
-        if message.get('tool_calls') or message.get('function_call'):
-            raise APIError(400, 'Tool calls are not supported', 'unsupported_feature')
-        normalized.append({'role': message['role'], 'content': content})
-    # Forward generation hints to the worker, without promising Muse enforces them.
-    result = {'model': 'muse', 'messages': normalized}
-    for name in ('temperature', 'top_p', 'max_tokens', 'max_completion_tokens', 'stop'):
-        if name in body:
-            result[name] = body[name]
-    return result
 
 
 class Server(ThreadingHTTPServer):
@@ -189,11 +161,29 @@ class Server(ThreadingHTTPServer):
         self.config = config
         self.queue = Queue(config) if config.backend == 'queue' else None
         self.slots = threading.BoundedSemaphore(config.max_pending)
+        self.responses = responses_api.ResponseStore(str(Path(config.db).with_name('responses.sqlite3')),
+                                                     config.response_ttl, config.response_capacity)
         super().__init__(address, Handler)
+
+    def complete(self, request):
+        wire, context = prepare_request(request, self.config.tool_mode)
+        if self.config.backend == 'queue':
+            raw = self.queue.wait(self.queue.enqueue(wire))
+        else:
+            if not self.slots.acquire(blocking=False):
+                raise APIError(429, 'Bridge concurrency limit reached; retry later', 'queue_full')
+            try:
+                cfg = self.config
+                raw = muse_backend.complete(cfg.upstream_url, cfg.upstream_key, cfg.upstream_model, wire, cfg.timeout)
+            except muse_backend.BackendError as e:
+                raise APIError(e.status, e.message, e.code) from None
+            finally:
+                self.slots.release()
+        return normalize_completion(raw, request, context)
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'OsasBridge/0.1'
+    server_version = 'OsasBridge/0.3'
 
     def log_message(self, format, *args):
         # Do not log URLs, bodies, auth headers, or worker replies.
@@ -228,8 +218,8 @@ class Handler(BaseHTTPRequestHandler):
         if not 0 < length <= MAX_BODY:
             raise APIError(413, 'Body must be between 1 byte and 1 MiB')
         try:
-            body = json.loads(self.rfile.read(length))
-        except (ValueError, UnicodeError):
+            body = loads(self.rfile.read(length))
+        except (ValueError, UnicodeError, RecursionError):
             raise APIError(400, 'Invalid JSON body')
         if not isinstance(body, dict):
             raise APIError(400, 'JSON body must be an object')
@@ -243,9 +233,23 @@ class Handler(BaseHTTPRequestHandler):
         self.authenticate(worker=worker)
         if worker and self.server.config.backend != 'queue':
             raise APIError(409, 'Worker endpoints are disabled in muse2api backend mode', 'backend_mismatch')
+        if method == 'GET' and path == '/v1/capabilities':
+            return self.send_json(200, {'tool_mode': self.server.config.tool_mode,
+                'chat_completions': True, 'responses': True, 'function_tools': self.server.config.tool_mode != 'disabled',
+                'structured_output': self.server.config.tool_mode != 'disabled', 'tool_execution': 'client',
+                'streaming': 'buffered_sse', 'usage': 'unavailable', 'multimodal': False,
+                'response_retention_seconds': self.server.config.response_ttl})
+        if method == 'GET' and path == '/v1/models/muse':
+            return self.send_json(200, {'id': 'muse', 'object': 'model', 'created': 0, 'owned_by': 'muse-bridge'})
         if method == 'GET' and path == '/v1/models':
             return self.send_json(200, {'object': 'list', 'data': [
                 {'id': 'muse', 'object': 'model', 'created': 0, 'owned_by': 'muse-bridge'}]})
+        if path.startswith('/v1/responses/') and method in ('GET', 'DELETE'):
+            response_id = path[len('/v1/responses/'):]
+            if method == 'GET':
+                return self.send_json(200, self.server.responses.get(response_id)[0])
+            self.server.responses.delete(response_id)
+            return self.send_json(200, {'id': response_id, 'object': 'response.deleted', 'deleted': True})
         if method != 'POST':
             raise APIError(404, 'Endpoint not found', 'not_found')
         body = self.read_json()
@@ -254,49 +258,59 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/worker/answer':
             if not all(isinstance(body.get(k), str) and body[k] for k in ('id', 'lease_token')):
                 raise APIError(400, 'id and lease_token are required strings')
-            content, error = body.get('content'), body.get('error')
-            if (content is None) == (error is None):
-                raise APIError(400, 'Send exactly one of content or error')
-            if not isinstance(content if error is None else error, str):
+            content, error, response = body.get('content'), body.get('error'), body.get('response')
+            if sum(v is not None for v in (content, error, response)) != 1:
+                raise APIError(400, 'Send exactly one of content, error, or response')
+            if response is not None:
+                if not isinstance(response, dict) or not isinstance(response.get('message'), dict):
+                    raise APIError(400, 'response must contain an assistant message object')
+            elif not isinstance(content if error is None else error, str):
                 raise APIError(400, 'content/error must be a string')
-            self.server.queue.answer(body['id'], body['lease_token'], content, error)
+            self.server.queue.answer(body['id'], body['lease_token'], content, error, response)
             return self.send_json(200, {'ok': True})
+        if path == '/v1/responses':
+            chat, history = responses_api.to_chat(body, self.server.responses)
+            request = validate_request(chat)
+            completion = self.server.complete(request)
+            response = responses_api.build_response(body, completion)
+            if response['store']:
+                self.server.responses.save(response, history + [completion['message']])
+            if not body.get('stream', False):
+                return self.send_json(200, response)
+            self.start_sse()
+            for event in responses_api.events(response):
+                self.wfile.write(('event: ' + event['type'] + '\ndata: ' + json.dumps(event, ensure_ascii=False) + '\n\n').encode())
+            self.wfile.flush()
+            return
         if path != '/v1/chat/completions':
             raise APIError(404, 'Endpoint not found', 'not_found')
         request = validate_request(body)
-        finish_reason = 'stop'
-        if self.server.config.backend == 'queue':
-            job_id = self.server.queue.enqueue(request)
-            content = self.server.queue.wait(job_id)
-        else:
-            if not self.server.slots.acquire(blocking=False):
-                raise APIError(429, 'Bridge concurrency limit reached; retry later', 'queue_full')
-            try:
-                cfg = self.server.config
-                content, finish_reason = muse_backend.complete(
-                    cfg.upstream_url, cfg.upstream_key, cfg.upstream_model, request, cfg.timeout)
-            except muse_backend.BackendError as e:
-                raise APIError(e.status, e.message, e.code) from None
-            finally:
-                self.server.slots.release()
-            job_id = 'job_' + uuid.uuid4().hex
-        response = {'id': 'chatcmpl-' + job_id[4:], 'object': 'chat.completion',
+        completion = self.server.complete(request)
+        message, finish_reason = completion['message'], completion['finish_reason']
+        if 'functions' in body and message.get('tool_calls'):
+            message = {'role': 'assistant', 'content': message['content'], 'function_call': message['tool_calls'][0]['function']}
+            finish_reason = 'function_call'
+        response = {'id': 'chatcmpl-' + uuid.uuid4().hex, 'object': 'chat.completion',
                     'created': int(time.time()), 'model': 'muse', 'choices': [
-                        {'index': 0, 'message': {'role': 'assistant', 'content': content}, 'finish_reason': finish_reason}]}
+                        {'index': 0, 'message': message, 'finish_reason': finish_reason}]}
         if not body.get('stream', False):
             return self.send_json(200, response)
         # Buffered SSE: no fabricated incremental generation or token accounting.
+        stream_options = body.get('stream_options') or {}
+        if not isinstance(stream_options, dict):
+            raise APIError(400, 'stream_options must be an object')
+        self.start_sse()
+        for chunk in chat_chunks(response, stream_options.get('include_usage', False)):
+            self.wfile.write(('data: ' + json.dumps(chunk, ensure_ascii=False) + '\n\n').encode())
+        self.wfile.write(b'data: [DONE]\n\n')
+        self.wfile.flush()
+
+    def start_sse(self):
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Accel-Buffering', 'no')
         self.end_headers()
-        for delta, reason in [({'role': 'assistant', 'content': content}, None), ({}, finish_reason)]:
-            chunk = {k: response[k] for k in ('id', 'created', 'model')}
-            chunk.update(object='chat.completion.chunk', choices=[{'index': 0, 'delta': delta, 'finish_reason': reason}])
-            self.wfile.write(('data: ' + json.dumps(chunk, ensure_ascii=False) + '\n\n').encode())
-        self.wfile.write(b'data: [DONE]\n\n')
-        self.wfile.flush()
 
     def handle_request(self, method):
         try:
@@ -314,6 +328,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.handle_request('POST')
+
+    def do_DELETE(self):
+        self.handle_request('DELETE')
 
 
 def main():
@@ -333,7 +350,10 @@ def main():
                         backend=os.getenv('BRIDGE_BACKEND', 'queue'),
                         upstream_url=os.getenv('MUSE_UPSTREAM_URL', 'http://127.0.0.1:18610/v1'),
                         upstream_key=os.getenv('MUSE_UPSTREAM_KEY', ''),
-                        upstream_model=os.getenv('MUSE_UPSTREAM_MODEL', 'muse-spark'))
+                        upstream_model=os.getenv('MUSE_UPSTREAM_MODEL', 'muse-spark'),
+                        tool_mode=os.getenv('BRIDGE_TOOL_MODE', 'emulate'),
+                        response_ttl=float(os.getenv('BRIDGE_RESPONSE_TTL', '3600')),
+                        response_capacity=int(os.getenv('BRIDGE_RESPONSE_CAPACITY', '128')))
         server = Server((args.host, args.port), config)
     except (ValueError, OSError) as e:
         parser.exit(1, f'Startup failed: {e}\n')

@@ -7,7 +7,7 @@ muse.example.com {
     }
     # Includes chat/models so 9Router can run on another VPS. All API routes
     # require their respective bearer keys in the bridge; only health is public.
-    @bridge path /worker/claim /worker/answer /health /v1/models /v1/chat/completions
+    @bridge path /worker/claim /worker/answer /health /v1/models /v1/models/muse /v1/capabilities /v1/chat/completions /v1/responses /v1/responses/*
     handle @bridge {
         reverse_proxy 127.0.0.1:8765 {
             transport http {

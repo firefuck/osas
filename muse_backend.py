@@ -58,10 +58,10 @@ def complete(url, api_key, model, request, timeout):
         choice = result['choices'][0]
         content = choice['message']['content']
         finish_reason = choice.get('finish_reason', 'stop')
-        if not isinstance(content, str) or choice['message'].get('tool_calls'):
+        if not isinstance(content, str) and not choice['message'].get('tool_calls') and not choice['message'].get('refusal'):
             raise ValueError()
-        if finish_reason not in ('stop', 'length', 'content_filter'):
+        if finish_reason not in ('stop', 'length', 'content_filter', 'tool_calls'):
             raise ValueError()
     except (KeyError, IndexError, TypeError, ValueError):
         raise BackendError('Muse adapter did not return a supported text completion') from None
-    return content, finish_reason
+    return {'message': choice['message'], 'finish_reason': finish_reason}

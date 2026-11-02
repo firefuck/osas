@@ -16,8 +16,8 @@ bukti systemd, DNS, HTTPS, atau Muse sudah terpasang dan bekerja di VPS tersebut
 Gunakan arsip release dan checksum yang dibuat oleh
 `python3 scripts/package_release.py --output /path/osas-bridge-ubuntu22.tar.gz`.
 Jangan mengarsipkan seluruh checkout karena berisi `.env` dan database privat.
-Repo GitHub awalnya kosong; jangan mengandalkan `git clone` untuk mengambil kode
-ini sebelum kode benar-benar di-push ke remote.
+Source juga tersedia di `https://github.com/firefuck/osas`; gunakan checkout
+commit yang sudah diuji untuk deployment yang dapat dilacak.
 
 Salin kedua file ke VPS dengan metode transfer privat yang biasa lo pakai.
 Contoh dari komputer yang menyimpan arsip (ganti `USER` dan `VPS_HOST`):
@@ -34,16 +34,20 @@ sha256sum -c osas-bridge-ubuntu22.tar.gz.sha256
 mkdir osas-bridge-release
 tar -xzf osas-bridge-ubuntu22.tar.gz -C osas-bridge-release
 cd osas-bridge-release/osas
-python3 -m unittest discover -s tests -v
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m unittest discover -s tests -v
 sudo bash deploy/install-ubuntu.sh
 ```
 
 Ubuntu 22.04 biasanya menyediakan `/usr/bin/python3` versi 3.10. Jika belum ada,
-install `python3` melalui paket Ubuntu terlebih dahulu. Tidak perlu pip.
+install `python3` dan `python3-venv` melalui paket Ubuntu terlebih dahulu.
+Installer membuat venv di `/opt/osas-bridge/.venv` dan memasang requirements
+terpin untuk validator JSON Schema; akses PyPI diperlukan saat install.
 Installer membutuhkan systemd dan port 8765 yang kosong; tidak memasang atau
 me-restart 9Router, tidak mengubah firewall, dan tidak memasang reverse proxy.
 Jika bridge sebelumnya sudah terpasang, installer menolak overwrite; gunakan
-prosedur upgrade terpisah agar kunci dan antrean tetap terjaga.
+prosedur upgrade di [TOOL_CALLING.md](../TOOL_CALLING.md) agar kunci dan antrean tetap terjaga.
 
 File runtime disalin ke `/opt/osas-bridge`. Kredensial baru dibuat di
 `/etc/osas-bridge/bridge.env` (root-only, mode 600). Database dikelola oleh
@@ -98,7 +102,8 @@ Caddy bersamaan pada port 80/443 atau mengganti konfigurasi website yang ada.
   memakai mode Flexible untuk membawa key ke origin lewat HTTP. Gunakan Full
   (strict) jika mengaktifkan proxy Cloudflare.
 
-Contoh proxy membuka `/v1/models` dan `/v1/chat/completions` (user key),
+Contoh proxy membuka `/v1/models`, `/v1/chat/completions`, `/v1/responses`,
+retrieve/delete Responses dan `/v1/capabilities` (user key),
 `/worker/claim` dan `/worker/answer` (worker key), serta `/health`. Endpoint admin
 adapter tidak dibuka. Timeout upstream 270 detik memberi ruang bagi request chat
 yang menunggu hingga 240 detik. CDN/edge proxy atau client bisa memiliki batas

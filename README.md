@@ -1,193 +1,148 @@
-# osas — Muse bridge untuk 9Router
+# osas — Muse bridge untuk 9Router dan client OpenAI
 
-Bridge kecil berbasis Python (standard library, tanpa paket tambahan) untuk
-mengantrekan chat dari 9Router dan menerima jawaban dari agent di Muse.
+Bridge untuk akun Muse milik lo, dengan Chat Completions, Responses API, dan
+siklus function/tool calling. Bridge bisa dipasang di VPS terpisah dari 9Router.
+
+**Status:** protokol tool/agent, streaming, dan SDK OpenAI diuji menggunakan
+backend sintetis lokal. Login Muse asli, kualitas emulasi model, kompatibilitas
+9Router/Codex pada deployment pengguna, dan pemakaian bonus 1B token belum diuji.
+Ini bukan API resmi Muse dan bukan implementasi seluruh produk OpenAI.
 
 ```text
-Client → 9Router → bridge HTTP → antrean SQLite
-                                  ↑         ↓
-                              jawaban    claim job
-                                  ↑         ↓
-                              agent Muse + worker.py
+Client agent / 9Router → HTTPS + user key → osas bridge
+                                              │
+                         ┌────────────────────┴────────────────────┐
+                         ▼                                         ▼
+                backend=muse2api                            backend=queue
+                Muse2API + Chromium                          worker di Muse
+                proxy HTTP/SOCKS5 opsional                    mengambil job
+                         │                                         │
+                         └────────────────── Muse ─────────────────┘
 ```
 
-**Status:** alur HTTP, helper worker, backend Muse2API, dan konfigurasi proxy
-diuji lokal dengan jawaban sintetis.
-Integrasi dengan akun Muse asli, pemakaian bonus 1B token, dan konfigurasi
-9Router pengguna belum diuji. Proyek ini tidak mengasumsikan adanya API resmi
-Muse. Mode default `queue` memakai `worker.py` untuk memindahkan pesan; agent
-Muse yang menghasilkan jawaban. Mode opsional `muse2api` memanggil adapter
-komunitas terpisah yang mengelola login/session Muse dan proxy keluar ke Muse.
+## Fitur API
 
-**Untuk bridge di VPS berbeda dari 9Router, dengan proxy opsional ke Muse**, ikuti
-[panduan mode Muse2API](deploy/REMOTE_MUSE.md). Dalam mode ini tidak perlu worker
-atau scheduled task di Muse. Proxy HTTP/SOCKS5 diatur pada akun adapter.
+- Chat: `/v1/chat/completions`, `/v1/models`, `/v1/models/muse`.
+- Responses: `/v1/responses`, retrieve/delete `/v1/responses/{id}`,
+  `previous_response_id`, atau replay riwayat tanpa penyimpanan server.
+- `tools` function, `tool_choice` auto/none/required/named, beberapa call,
+  `parallel_tool_calls`, hasil `role=tool`, serta input legacy `functions`.
+- JSON Schema untuk argumen dan structured output (`json_object`/`json_schema`).
+- SSE Chat dan lifecycle Responses, termasuk delta argumen function.
+  **Output masih buffered:** SSE dikirim setelah generasi lengkap, bukan token live.
+- Mode default `BRIDGE_TOOL_MODE=emulate`: kontrak prompt dibungkus envelope unik,
+  diterjemahkan menjadi tool calls, dan divalidasi. Output yang tidak sesuai
+  menghasilkan 502; tidak dianggap tool call yang boleh dieksekusi.
+- Mode `native` tersedia untuk upstream yang benar-benar sudah diverifikasi
+  mendukung protokol tools. Belum diverifikasi pada Muse. `disabled` menonaktifkan
+  tools/structured output.
+- `/v1/capabilities` menjelaskan kemampuan dan batasan aktual.
 
-## Jalankan bridge
+**Tool dieksekusi oleh client agent**, bukan oleh server bridge. Function seperti
+baca file, edit file, terminal, atau browser harus disediakan oleh client yang
+menggunakan API. Bridge tidak memberi model akses shell otomatis di VPS.
+Lihat [panduan lengkap tool calling](TOOL_CALLING.md) dan contoh agent siap jalan.
 
-Butuh Python **3.10+** dengan SQLite. Jalankan dari root checkout:
+## Jalankan lokal
+
+Python **3.10+**, SQLite, dan dependencies di `requirements.txt`:
 
 ```bash
-cd /workspace/osas  # sesuaikan jika disalin ke Muse/VPS lain
+cd /workspace/osas  # sesuaikan lokasi checkout
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 python3 scripts/init_env.py
 set -a
 . ./.env
 set +a
-python3 bridge.py serve
+.venv/bin/python bridge.py serve
 ```
 
-`init_env.py` membuat `.env` privat (mode 600) berisi dua kunci acak berbeda.
-Perintah ini sengaja menolak menimpa `.env` yang sudah ada. Saat restart cukup
-muat `.env` dan jalankan server; jangan generate ulang kunci.
+`init_env.py` membuat kunci acak di `.env` (mode 600), menolak overwrite.
+Untuk backend adapter langsung pada instalasi baru gunakan
+`python3 scripts/init_env.py --backend muse2api` sebagai pengganti perintah init.
+Saat restart, cukup muat `.env` dan jalankan server lagi. Jangan regenerate key.
+Server membaca environment, tidak memuat `.env` sendiri.
 
-Health check di terminal lain:
+`GET /health` mengembalikan `ok=true` bila server aktif; itu tidak membuktikan
+koneksi Muse. Default bind `127.0.0.1:8765`, bukan server HTTP publik yang
+sudah diperkeras. Gunakan reverse proxy HTTPS untuk akses dari mesin berbeda.
 
-```bash
-curl --fail http://127.0.0.1:8765/health
-```
+## Deploy VPS dan login Muse
 
-Hasil `{"ok": true, ...}` hanya membuktikan server aktif, bukan Muse terhubung.
-Data runtime di `.local/` dan `.env` diabaikan Git. Jangan commit atau membagikan
-file tersebut. Tidak perlu menaruh cookie akun Muse di bridge.
+- [Ubuntu 22 + 9Router npm + systemd](deploy/UBUNTU22.md).
+- [Bridge di VPS terpisah + Muse2API + proxy keluar ke Muse](deploy/REMOTE_MUSE.md).
 
-## Hubungkan 9Router
+Adapter Muse2API memakai Chromium headless. Login dilakukan di browser lo dan
+session diimpor secara privat ke adapter; `osas` tidak punya form password Muse.
+Adapter memiliki key administrasi yang terpisah dari key client bridge.
+Jangan kirim cookie, session, atau key ke chat. Jangan expose panel admin/CDP.
 
-Di dashboard 9Router, tambahkan provider **OpenAI-compatible / custom**:
+Untuk backend `queue`, ikuti [instruksi worker Muse](MUSE_WORKER.md).
+`worker.py` sendiri tetap standard-library-only. Ia memindahkan pesan, bukan
+menghasilkan jawaban. Proxy `BRIDGE_PROXY_URL` pada worker hanya merutekan
+**worker → bridge**, berbeda dari proxy **adapter → Muse**. Lihat
+`worker.env.example` untuk opsi HTTP CONNECT. Secara default proxy sistem dan
+trust TLS diwarisi; tidak ada opsi mematikan verifikasi sertifikat.
 
-| Field | Nilai |
+## Isi provider 9Router
+
+| Pengaturan | Nilai |
 | --- | --- |
-| Nama | Muse Bridge |
-| Base URL | `http://127.0.0.1:8765/v1` jika satu mesin; `https://DOMAIN_BRIDGE/v1` jika beda VPS |
-| API key | Nilai `BRIDGE_USER_KEY` dari `.env`, masukkan secara privat |
-| Model ID upstream | `muse` |
-| Timeout | Lebih dari 240 detik, jika versinya menyediakan pengaturan ini |
+| Tipe | OpenAI-compatible / custom |
+| Base URL, satu mesin | `http://127.0.0.1:8765/v1` |
+| Base URL, beda VPS | `https://DOMAIN_BRIDGE/v1` |
+| API key provider | `BRIDGE_USER_KEY` |
+| Model upstream | `muse` |
+| Timeout | Lebih dari 240 detik, bila tersedia |
 
-Nama menu/alias publik dapat berbeda antar versi 9Router. Pilih ID/alias model
-yang ditampilkan 9Router saat memanggil endpoint milik 9Router. Endpoint bridge
-sendiri selalu menerima ID `muse`. Gunakan API key **9Router** untuk mengakses
-9Router, bukan worker key.
+Client yang menghubungi 9Router menggunakan key dan alias model dari dashboard
+9Router. `127.0.0.1` selalu berarti mesin/container pemanggil. Contoh Nginx/Caddy
+membuka endpoint API yang diperlukan, tanpa meneruskan panel admin adapter.
 
-Bridge dan 9Router boleh berada di VPS yang sama atau terpisah. `127.0.0.1` selalu
-merujuk ke mesin/container pemanggil. Jika Muse/9Router berada di mesin lain,
-siapkan URL HTTPS bridge yang dapat dijangkau melalui reverse proxy milik lo;
-jangan arahkan ke loopback mesin berbeda. Server ini default-nya hanya bind
-loopback dan bukan server publik yang diperkeras. Gunakan HTTPS, batas koneksi,
-batas ukuran request, dan rate limit di reverse proxy untuk akses jarak jauh.
-Atur timeout reverse proxy/client lebih panjang dari `BRIDGE_TIMEOUT`.
-Koneksi publik/tunnel belum disiapkan otomatis oleh proyek ini.
+## Penyimpanan dan batasan
 
-Untuk **Ubuntu 22 + 9Router via npm**, lihat
-[panduan VPS dan systemd](deploy/UBUNTU22.md). Installer membuat kunci baru di
-VPS; paket release tidak membawa `.env` atau database dari workspace ini.
+- Tools yang didukung adalah **function tools**, bukan hosted web search, computer
+  use, code interpreter, custom grammar tools, atau MCP otomatis. Client dapat
+  mengimplementasikan fungsi tersebut sendiri dan mendaftarkannya sebagai tool.
+- Belum ada input gambar/audio, embeddings, speech, fine-tuning, atau upload file
+  ala OpenAI. Unsupported modality/tool type ditolak, bukan disimulasikan.
+- JSON Schema memakai Draft 2020-12. `$ref` lokal/`$defs`, kombinator, required,
+  additionalProperties, dan format yang didukung validator diperiksa. Remote refs dan resource `$id`
+  ditolak agar schema tidak mengakses jaringan; gunakan schema self-contained.
+- Tidak ada token count/usage palsu. Usage saat ini tidak tersedia (`null` pada
+  Responses dan chunk include_usage); alias `muse` bukan bukti nama model dasar.
+- Temperature/token limits diteruskan sebagai petunjuk; penerapan persis oleh
+  Muse belum dijamin. Tidak ada automatic retry/repair yang diam-diam memakai kuota.
+- Responses menyimpan histori secara default untuk chaining. Gunakan `store:false`
+  untuk opt-out dan kirim ulang seluruh riwayat tool. TTL default 1 jam, maksimum
+  128 respons tersimpan, lalu yang tertua dievikt. Hanya output yang lengkap dan
+  tervalidasi yang disimpan. GET/DELETE tetap memerlukan user key yang sama.
+  Record kedaluwarsa dibersihkan saat akses get/save, bukan lewat daemon periodik.
+- `.env`, SQLite/WAL di `.local/`, dan volume akun adapter bersifat privat dan
+  diabaikan Git. SQLite tidak terenkripsi; TTL/delete bukan secure erase.
+  Database response berada di sebelah `BRIDGE_DB`, bernama `responses.sqlite3`.
+- Queue worker memakai lease atomik dan menolak jawaban ganda/kedaluwarsa. Restart
+  memutus request HTTP yang masih terbuka. Adapter bisa tetap bekerja setelah
+  client putus; periksa status sebelum retry agar tidak mengonsumsi kuota ganda.
+- Max body 1 MiB, 256 pesan, 128 function tools. Request timeout 240 detik.
+  Reverse proxy, CDN dan client harus menoleransi waktu tunggu tanpa token live.
 
-## Pasang worker di Muse
-
-Bagian ini hanya untuk `BRIDGE_BACKEND=queue` (default). Pada backend `muse2api`,
-gunakan panduan REMOTE_MUSE di atas; endpoint worker nonaktif.
-
-1. Salin `worker.py` dan [MUSE_WORKER.md](MUSE_WORKER.md) ke lingkungan Muse.
-2. Siapkan `BRIDGE_URL` dan **hanya** `BRIDGE_WORKER_KEY` di environment worker
-   secara privat. Gunakan loopback jika bridge satu mesin, HTTPS jika terpisah.
-3. Berikan instruksi dari `MUSE_WORKER.md` ke agent Muse; uji sekali sebelum
-   memasangnya sebagai scheduled task setiap menit. Jadwal ini membangunkan
-   **agent Muse**, bukan cuma menjalankan Python berulang kali.
-4. Saat request menunggu, Muse menjalankan `claim`, membaca pesan, menghasilkan
-   jawaban, lalu menjalankan `answer`. Tanpa agent aktif, request berakhir 504.
-
-Contoh perintah yang dijalankan agent (working directory berisi `worker.py`):
-
-```bash
-umask 077
-python3 worker.py claim --output /tmp/muse-job-UNIQUE.json --wait 20
-# Jika ada job: agent baca file, lalu tulis jawaban ke file privat.
-python3 worker.py answer --job-file /tmp/muse-job-UNIQUE.json --text-file /tmp/muse-answer-UNIQUE.txt
-```
-
-Ganti `UNIQUE` untuk setiap invocation. Helper menghapus file job setelah
-pengiriman berhasil; agent harus menghapus file jawaban setelah selesai.
-Jangan menampilkan file job atau kunci pada chat/log publik.
-
-Worker juga punya opsi **proxy untuk koneksi worker → bridge**, terpisah dari
-proxy adapter → Muse. Lihat `worker.env.example`: set `BRIDGE_PROXY_URL` secara
-privat untuk HTTP CONNECT dengan autentikasi opsional. Tidak diisi berarti
-mewarisi proxy sistem dan `NO_PROXY`, bukan menonaktifkan proxy platform. Opsi
-ini tidak merutekan request layanan Muse. SOCKS5 tersedia pada adapter Muse2API,
-tetapi bukan pada helper worker stdlib. URL proxy berisi password jangan ditaruh
-di argumen CLI atau log. Variabel alternatif dapat dipilih lewat `--proxy-env`.
-
-## Coba request
-
-Di terminal terpisah dari server, dari root checkout:
+## Validasi
 
 ```bash
-set -a
-. ./.env
-set +a
-python3 - <<'PY'
-import json, os, urllib.request
-request = urllib.request.Request(
-    'http://127.0.0.1:8765/v1/chat/completions',
-    json.dumps({'model': 'muse', 'messages': [
-        {'role': 'user', 'content': 'Jawab singkat: 2 + 2 berapa?'}]}).encode(),
-    {'Content-Type': 'application/json',
-     'Authorization': 'Bearer ' + os.environ['BRIDGE_USER_KEY']})
-with urllib.request.urlopen(request, timeout=260) as response:
-    print(json.load(response)['choices'][0]['message']['content'])
-PY
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m unittest discover -s tests -v
 ```
 
-Request menunggu hingga worker Muse mengirim jawaban. Untuk menguji lewat
-9Router, ganti URL dengan endpoint 9Router, kunci dengan API key 9Router, dan
-model dengan alias yang dibuat di dashboard. Jangan gunakan jawaban sintetis
-sebagai bukti bahwa akun Muse sudah tersambung.
+Tes menguji alur HTTP, tool loop, read/write file lokal dari client contoh,
+JSON Schema, Responses chaining/TTL, streaming, SDK OpenAI, lease, dan proxy
+CONNECT lokal. Tidak memakai akun Muse atau Internet saat tes. OpenSSL diperlukan
+untuk empat tes TLS; SDK test memerlukan `requirements-dev.txt`. Skipped bukan passed.
 
-## Dukungan dan batasan
+Arsip source-only dibuat dengan `scripts/package_release.py`; manifest eksplisit
+mengecualikan `.env`, database, venv, dan source/cache adapter.
 
-- `GET /health`, `GET /v1/models`, `POST /v1/chat/completions`.
-- Worker: `POST /worker/claim`, `POST /worker/answer`, bearer key terpisah.
-- Chat teks, histori multi-pesan, satu jawaban (`n=1`).
-- `stream=true` menghasilkan **SSE setelah jawaban lengkap tersedia**. Tidak ada
-  token live atau heartbeat selama menunggu. Client dengan idle timeout pendek
-  bisa putus; gunakan non-streaming untuk uji pertama.
-- Belum mendukung tools/function calling, gambar, Responses API, embeddings,
-  structured output, atau pelaporan usage token. Cocok untuk chat teks awal;
-  belum cukup untuk agent coding yang membutuhkan tool calls.
-- Parameter temperature/token limit/stop diteruskan sebagai petunjuk ke worker;
-  tidak ada jaminan Muse dapat menerapkannya secara persis.
-- `muse` adalah alias bridge, bukan bukti identitas model dasar yang dipakai Muse.
-- Queue SQLite persisten, claim atomik, lease dengan token, penolakan jawaban
-  ganda/kedaluwarsa, kapasitas default 32 request. Restart server memutus request
-  HTTP yang masih terbuka; client perlu retry. Tidak ada exactly-once inference.
-- Pada `BRIDGE_BACKEND=muse2api`, antrean worker tidak dipakai. Konkurensi dibatasi
-  `BRIDGE_MAX_PENDING`; installer mode ini memilih 1. Upstream key terpisah dari
-  user key 9Router. Adapter bisa tetap menghasilkan jawaban setelah client
-  timeout; periksa statusnya sebelum retry untuk menghindari pemakaian ganda.
-- Request timeout default 240 detik; lease default 300 detik dibatasi deadline
-  request. Tidak ada perpanjangan lease. Jadwal terlalu lambat/jawaban terlalu
-  lama dapat menghabiskan timeout. Jangan aktifkan retry agresif karena dapat
-  mengulang pekerjaan dan mengonsumsi kuota.
-- Prompt/hasil dihapus secara logis setelah hasil diambil atau request timeout.
-  Record lama dibersihkan saat enqueue/claim; SQLite/WAL dan backup bukan
-  penyimpanan terenkripsi atau secure erase. File jawaban Muse perlu dibersihkan.
-- Besar request maksimum 1 MiB; tidak ada key atau isi pesan di access log.
-
-Pengaturan tersedia di `.env.example`. Server membaca environment, bukan memuat
-`.env` sendiri. Tidak ada koneksi ke Muse sampai worker benar-benar dijalankan.
-
-## Tes
-
-```bash
-python3 -m unittest discover -s tests -v
-```
-
-Tes menjalankan HTTP server loopback, adapter sintetis, dan proxy CONNECT lokal.
-Mencakup auth, SSE, timeout, lease kedaluwarsa, reopen database, claim serentak,
-kapasitas antrean, pemetaan upstream model/key, helper proxy akun, dan penolakan
-fitur yang belum didukung. Tes proxy TLS membutuhkan executable `openssl` untuk
-sertifikat sementara; tanpa OpenSSL, empat tes itu ditandai skipped. Tidak
-membutuhkan akun Muse atau koneksi Internet.
-
-Desain antrean terinspirasi dokumentasi publik
-[Muse-on-9Router-Hermes-Agent-ai](https://github.com/Kutuyyy/Muse-on-9Router-Hermes-Agent-ai).
-Implementasi ini menggunakan endpoint worker sendiri; jangan mencampur helper
-dari repo lain. Panduan router: [decolua/9router](https://github.com/decolua/9router).
+Referensi komunitas: [Muse worker bridge](https://github.com/Kutuyyy/Muse-on-9Router-Hermes-Agent-ai)
+dan [Muse2API](https://github.com/czg86389-hub/muse2api). Source adapter tidak
+vendored di repo ini; commit yang digunakan dijelaskan di panduan deployment.

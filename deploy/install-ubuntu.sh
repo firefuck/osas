@@ -27,6 +27,7 @@ fi
 
 python_bin="$(command -v python3)"
 "$python_bin" -c 'import sys, sqlite3; assert sys.version_info >= (3, 10), "Python 3.10+ required"'
+"$python_bin" -c 'import venv, ensurepip' || { echo 'Install python3-venv before running this installer.' >&2; exit 1; }
 if [[ -z $stage_root ]]; then
     [[ -x /usr/bin/python3 ]] || { echo '/usr/bin/python3 is required' >&2; exit 1; }
     /usr/bin/python3 -c 'import sys, sqlite3; assert sys.version_info >= (3, 10)'
@@ -47,13 +48,17 @@ for target in "$app_dir" "$config_dir" "$unit_file" "$stage_root/var/lib/osas-br
         exit 1
     fi
 done
-for file in bridge.py muse_backend.py worker.py README.md MUSE_WORKER.md scripts/init_env.py deploy/osas-bridge.service; do
+for file in bridge.py chat_protocol.py responses_api.py muse_backend.py worker.py requirements.txt README.md MUSE_WORKER.md scripts/init_env.py deploy/osas-bridge.service; do
     [[ -f "$source_dir/$file" && ! -L "$source_dir/$file" ]] || { echo "Missing/invalid release file: $file" >&2; exit 1; }
 done
 
 install -d -m 0755 "$app_dir" "$(dirname -- "$unit_file")"
 install -d -m 0700 "$config_dir"
-install -m 0644 "$source_dir/bridge.py" "$source_dir/muse_backend.py" "$source_dir/worker.py" "$source_dir/README.md" "$source_dir/MUSE_WORKER.md" "$app_dir/"
+install -m 0644 "$source_dir/bridge.py" "$source_dir/chat_protocol.py" "$source_dir/responses_api.py" "$source_dir/muse_backend.py" "$source_dir/worker.py" "$source_dir/requirements.txt" "$source_dir/README.md" "$source_dir/MUSE_WORKER.md" "$app_dir/"
+"$python_bin" -m venv "$app_dir/.venv"
+"$app_dir/.venv/bin/python3" -m pip install --disable-pip-version-check -r "$app_dir/requirements.txt"
+# DynamicUser must be able to traverse/read the root-owned virtualenv.
+chmod -R a+rX "$app_dir/.venv"
 "$python_bin" "$source_dir/scripts/init_env.py" --output "$config_dir/bridge.env" --db /var/lib/osas-bridge/bridge.sqlite3 --backend "$backend"
 install -m 0644 "$source_dir/deploy/osas-bridge.service" "$unit_file"
 
@@ -77,4 +82,4 @@ for attempt in range(20):
         time.sleep(0.5)
 PY
 echo 'Installed. Credentials: /etc/osas-bridge/bridge.env (root-only); do not paste them into chat.'
-echo 'Next: configure HTTPS and the selected Muse backend. See deploy/UBUNTU22.md and deploy/REMOTE_MUSE.md.'
+echo 'Next: configure HTTPS and the selected Muse backend. See deploy/UBUNTU22.md, deploy/REMOTE_MUSE.md and TOOL_CALLING.md.'

@@ -30,9 +30,10 @@ resmi Muse atau konversi langsung dari bonus token.
 - Browser, build Docker, login/session Muse asli, proxy milik pengguna, kuota 1B,
   dan koneksi 9Router pengguna **belum diuji**. Langkah adapter di bawah adalah
   petunjuk deployment, bukan laporan bahwa sudah terpasang.
-- Bridge tetap chat teks dan buffered SSE, tanpa tools/function calling atau
-  pelaporan token usage, sekalipun adapter mendukung fitur lain. Upstream
-  mengimplementasikan koneksi Muse; osas tidak menebak endpoint internal Muse.
+- Bridge mendukung text + function tools, Responses API, dan buffered SSE.
+  Default tools memakai emulasi yang divalidasi; tool dieksekusi client.
+  Lihat [TOOL_CALLING.md](../TOOL_CALLING.md). Token usage belum tersedia.
+  Upstream mengimplementasikan koneksi Muse; osas tidak menebak endpoint internal Muse.
 
 ## 1. Pasang bridge di VPS B
 
@@ -50,8 +51,8 @@ concurrency 1. Service bridge boleh hidup sebelum adapter; request akan gagal
 proses bridge.
 
 Jika bridge versi sebelumnya sudah terpasang, installer sengaja menolak overwrite.
-Backup data dan konfigurasi dahulu, salin source baru termasuk `muse_backend.py`
-ke `/opt/osas-bridge`, dan edit file environment secara privat untuk mode ini.
+Ikuti prosedur upgrade dan dependencies baru di TOOL_CALLING.md; jangan hanya
+mengganti bridge.py karena ada modul protokol dan venv baru.
 Jangan mengganti user key yang sudah dipasang di 9Router tanpa kebutuhan.
 
 ## 2. Siapkan adapter Muse2API di VPS B
@@ -137,7 +138,8 @@ default, jalankan helper dengan `--remove` sebagai pengganti `--proxy-file`.
 
 Gunakan subdomain di VPS B dengan sertifikat valid, contoh
 `https://muse.example.com`. Contoh Nginx/Caddy di folder ini sekarang membuka
-`/v1/models` dan `/v1/chat/completions`, plus worker/health. `/v1/*` memerlukan user
+`/v1/models`, Chat Completions, Responses (termasuk retrieve/delete), capabilities,
+plus worker/health. `/v1/*` memerlukan user
 key; `/worker/*` memerlukan worker key dan akan ditolak saat backend=muse2api.
 Panel admin adapter tidak diteruskan.
 

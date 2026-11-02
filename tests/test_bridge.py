@@ -100,7 +100,7 @@ class BridgeTests(unittest.TestCase):
         for body in [{}, {'model': 'wrong', 'messages': []},
                      {'model': 'muse', 'messages': [{'role': 'tool', 'content': 'x'}]},
                      {'model': 'muse', 'messages': [{'role': 'user', 'content': [{'type': 'image_url'}]}]},
-                     {'model': 'muse', 'messages': [{'role': 'user', 'content': 'hi'}], 'tools': []}]:
+                     {'model': 'muse', 'messages': [{'role': 'user', 'content': 'hi'}], 'tools': [{'type': 'web_search'}]}]:
             self.assertIn(self.request('/v1/chat/completions', body)[0], (400, 404))
 
     def test_timeout_invalidates_job(self):
