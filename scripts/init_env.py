@@ -24,6 +24,7 @@ def main():
         out.write(f'BRIDGE_MAX_PENDING={1 if args.backend == "muse2api" else 32}\n')
         out.write(f'BRIDGE_BACKEND={args.backend}\n')
         out.write('BRIDGE_TOOL_MODE=emulate\nBRIDGE_RESPONSE_TTL=3600\nBRIDGE_RESPONSE_CAPACITY=128\n')
+        out.write('BRIDGE_MODEL_PROFILE=\n')
         if args.backend == 'muse2api':
             out.write('MUSE_UPSTREAM_URL=http://127.0.0.1:18610/v1\n')
             out.write(f'MUSE_UPSTREAM_KEY=m2a_{secrets.token_urlsafe(32)}\n')

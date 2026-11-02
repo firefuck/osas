@@ -16,8 +16,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import muse_backend
+from model_contract import ModelContract
 import responses_api
-from chat_protocol import APIError, validate_request, prepare_request, normalize_completion, chat_chunks, loads
+from chat_protocol import APIError, validate_request, prepare_request, normalize_completion, chat_chunks, loads, replay_fields
 
 LOG = logging.getLogger('osas')
 MAX_BODY = 1024 * 1024
@@ -38,6 +39,7 @@ class Config:
     tool_mode: str = 'emulate'
     response_ttl: float = 3600
     response_capacity: int = 128
+    model_profile: str | None = None
 
     def __post_init__(self):
         if min(len(self.user_key), len(self.worker_key)) < 32:
@@ -54,6 +56,7 @@ class Config:
             raise ValueError('BRIDGE_TOOL_MODE must be emulate, native, or disabled')
         if not math.isfinite(self.response_ttl) or self.response_ttl <= 0 or self.response_capacity < 1:
             raise ValueError('Response retention TTL and capacity must be positive')
+        self.contract = ModelContract.load(self.model_profile, self.upstream_model)
         if self.backend == 'muse2api':
             self.upstream_url = muse_backend.validate_url(self.upstream_url)
             if not self.upstream_key or not self.upstream_model:
@@ -168,22 +171,29 @@ class Server(ThreadingHTTPServer):
     def complete(self, request):
         wire, context = prepare_request(request, self.config.tool_mode)
         if self.config.backend == 'queue':
+            wire, budget = self.config.contract.prepare(request, wire)
             raw = self.queue.wait(self.queue.enqueue(wire))
         else:
             if not self.slots.acquire(blocking=False):
                 raise APIError(429, 'Bridge concurrency limit reached; retry later', 'queue_full')
             try:
                 cfg = self.config
+                def counter(payload):
+                    result = muse_backend.request_json(cfg.upstream_url, cfg.upstream_key, cfg.contract.count_tokens_path,
+                                                       muse_backend.chat_payload(cfg.upstream_model, payload), timeout=cfg.timeout)
+                    return result.get('input_tokens') if isinstance(result, dict) else None
+                wire, budget = cfg.contract.prepare(request, wire, counter=counter)
                 raw = muse_backend.complete(cfg.upstream_url, cfg.upstream_key, cfg.upstream_model, wire, cfg.timeout)
             except muse_backend.BackendError as e:
                 raise APIError(e.status, e.message, e.code) from None
             finally:
                 self.slots.release()
+        self.config.contract.check_result(raw, budget)
         return normalize_completion(raw, request, context)
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = 'OsasBridge/0.3'
+    server_version = 'OsasBridge/0.4'
 
     def log_message(self, format, *args):
         # Do not log URLs, bodies, auth headers, or worker replies.
@@ -238,12 +248,14 @@ class Handler(BaseHTTPRequestHandler):
                 'chat_completions': True, 'responses': True, 'function_tools': self.server.config.tool_mode != 'disabled',
                 'structured_output': self.server.config.tool_mode != 'disabled', 'tool_execution': 'client',
                 'streaming': 'buffered_sse', 'usage': 'unavailable', 'multimodal': False,
+                'reasoning_transport': 'json_passthrough',
+                'model_contract': self.server.config.contract.metadata(),
+                'max_request_bytes': MAX_BODY, 'max_messages': 256,
                 'response_retention_seconds': self.server.config.response_ttl})
         if method == 'GET' and path == '/v1/models/muse':
-            return self.send_json(200, {'id': 'muse', 'object': 'model', 'created': 0, 'owned_by': 'muse-bridge'})
+            return self.send_json(200, self.model_info())
         if method == 'GET' and path == '/v1/models':
-            return self.send_json(200, {'object': 'list', 'data': [
-                {'id': 'muse', 'object': 'model', 'created': 0, 'owned_by': 'muse-bridge'}]})
+            return self.send_json(200, {'object': 'list', 'data': [self.model_info()]})
         if path.startswith('/v1/responses/') and method in ('GET', 'DELETE'):
             response_id = path[len('/v1/responses/'):]
             if method == 'GET':
@@ -288,11 +300,14 @@ class Handler(BaseHTTPRequestHandler):
         completion = self.server.complete(request)
         message, finish_reason = completion['message'], completion['finish_reason']
         if 'functions' in body and message.get('tool_calls'):
-            message = {'role': 'assistant', 'content': message['content'], 'function_call': message['tool_calls'][0]['function']}
+            message = {'role': 'assistant', 'content': message['content'], 'function_call': message['tool_calls'][0]['function'],
+                       **replay_fields(message, status=502)}
             finish_reason = 'function_call'
         response = {'id': 'chatcmpl-' + uuid.uuid4().hex, 'object': 'chat.completion',
                     'created': int(time.time()), 'model': 'muse', 'choices': [
                         {'index': 0, 'message': message, 'finish_reason': finish_reason}]}
+        if completion.get('incomplete_tool_calls'):
+            response['bridge_details'] = {'incomplete_tool_calls': completion['incomplete_tool_calls'], 'executable': False}
         if not body.get('stream', False):
             return self.send_json(200, response)
         # Buffered SSE: no fabricated incremental generation or token accounting.
@@ -304,6 +319,12 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(('data: ' + json.dumps(chunk, ensure_ascii=False) + '\n\n').encode())
         self.wfile.write(b'data: [DONE]\n\n')
         self.wfile.flush()
+
+    def model_info(self):
+        contract = self.server.config.contract
+        return {'id': 'muse', 'object': 'model', 'created': 0, 'owned_by': 'muse-bridge',
+                'context_window': contract.context_window, 'context_length': contract.context_window,
+                'max_output_tokens': contract.max_output_tokens, 'model_contract': contract.metadata()}
 
     def start_sse(self):
         self.send_response(200)
@@ -353,7 +374,8 @@ def main():
                         upstream_model=os.getenv('MUSE_UPSTREAM_MODEL', 'muse-spark'),
                         tool_mode=os.getenv('BRIDGE_TOOL_MODE', 'emulate'),
                         response_ttl=float(os.getenv('BRIDGE_RESPONSE_TTL', '3600')),
-                        response_capacity=int(os.getenv('BRIDGE_RESPONSE_CAPACITY', '128')))
+                        response_capacity=int(os.getenv('BRIDGE_RESPONSE_CAPACITY', '128')),
+                        model_profile=os.getenv('BRIDGE_MODEL_PROFILE') or None)
         server = Server((args.host, args.port), config)
     except (ValueError, OSError) as e:
         parser.exit(1, f'Startup failed: {e}\n')

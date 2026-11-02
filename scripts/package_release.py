@@ -6,7 +6,8 @@ from pathlib import Path
 
 FILES = (
     '.env.example', 'worker.env.example', '.gitignore', 'README.md', 'MUSE_WORKER.md', 'TOOL_CALLING.md',
-    'requirements.txt', 'requirements-dev.txt', 'chat_protocol.py', 'responses_api.py',
+    'requirements.txt', 'requirements-dev.txt', 'chat_protocol.py', 'model_contract.py', 'responses_api.py',
+    'MODEL_CONTRACT.md', 'deploy/model-profile.example.json',
     'bridge.py', 'muse_backend.py', 'worker.py', 'scripts/init_env.py', 'scripts/package_release.py',
     'scripts/configure_muse_proxy.py',
     'deploy/install-ubuntu.sh', 'deploy/osas-bridge.service',
@@ -14,6 +15,7 @@ FILES = (
     'deploy/REMOTE_MUSE.md', 'deploy/muse2api.compose.yml', 'deploy/proxy.example.json',
     'tests/test_bridge.py', 'tests/test_worker_proxy.py', 'tests/test_muse_backend.py',
     'tests/test_tools.py', 'tests/test_agent_api.py', 'tests/tools_fixture.py', 'examples/agent_loop.py',
+    'tests/test_replay_limits.py',
 )
 
 

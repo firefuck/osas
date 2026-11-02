@@ -1,0 +1,11 @@
+{
+  "upstream_model": "muse-spark",
+  "verified": false,
+  "source": "Pinned Muse web adapter: context, output limits and reasoning replay are unverified",
+  "context_window": null,
+  "max_output_tokens": null,
+  "output_parameter": null,
+  "count_tokens_path": null,
+  "context_enforced_upstream": false,
+  "reasoning_replay": false
+}

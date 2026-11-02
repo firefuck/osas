@@ -41,6 +41,16 @@ def request_json(url, api_key, path, body, timeout=20, method='POST'):
                 raise BackendError('Muse adapter response exceeds 1 MiB')
             return json.loads(data)
     except urllib.error.HTTPError as e:
+        # Preserve machine-readable context/limit failures without exposing the
+        # provider's error text, prompts or account/session information.
+        if e.code in (400, 413, 422):
+            try:
+                error = json.loads(e.read(65536)).get('error', {})
+                code = error.get('code') if isinstance(error, dict) else None
+            except (ValueError, TypeError, AttributeError):
+                code = None
+            if code in ('context_length_exceeded', 'output_limit_exceeded'):
+                raise BackendError('Upstream rejected the request because its model token limit was exceeded', code, 400) from None
         if e.code in (401, 403):
             raise BackendError('Muse adapter authentication failed; check its private key', 'muse_auth_error') from None
         if e.code == 429:
@@ -51,8 +61,12 @@ def request_json(url, api_key, path, body, timeout=20, method='POST'):
         raise BackendError('Muse adapter connection or response failed; check its status and HTTPS trust') from None
 
 
+def chat_payload(model, request):
+    return dict(request, model=model, stream=False)
+
+
 def complete(url, api_key, model, request, timeout):
-    body = dict(request, model=model, stream=False)
+    body = chat_payload(model, request)
     result = request_json(url, api_key, '/chat/completions', body, timeout=timeout)
     try:
         choice = result['choices'][0]
@@ -64,4 +78,9 @@ def complete(url, api_key, model, request, timeout):
             raise ValueError()
     except (KeyError, IndexError, TypeError, ValueError):
         raise BackendError('Muse adapter did not return a supported text completion') from None
-    return {'message': choice['message'], 'finish_reason': finish_reason}
+    response = {'message': choice['message'], 'finish_reason': finish_reason}
+    # Retained internally for budget-contract checking, not claimed as frontend
+    # billing usage (the pinned web adapter returns placeholder zero counters).
+    if 'usage' in result:
+        response['usage'] = result['usage']
+    return response

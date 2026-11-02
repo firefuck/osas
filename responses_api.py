@@ -1,12 +1,13 @@
 """Text/function subset of OpenAI Responses, with bounded persistent chaining."""
 import json
+import copy
 import os
 import sqlite3
 import time
 import uuid
 from pathlib import Path
 
-from chat_protocol import APIError, dumps, text_content
+from chat_protocol import APIError, dumps, text_content, replay_fields
 
 
 class ResponseStore:
@@ -84,18 +85,22 @@ def to_chat(body, store):
             raise APIError(400, 'Response input items must be objects')
         kind = item.get('type', 'message')
         if kind == 'message':
-            messages.append({'role': item.get('role'), 'content': text_content(item.get('content'))})
+            role = item.get('role')
+            messages.append({'role': role, 'content': text_content(item.get('content'), allow_null=role == 'assistant'),
+                             **(replay_fields(item) if role == 'assistant' else {})})
         elif kind == 'function_call':
             call = {'id': item.get('call_id'), 'type': 'function',
                     'function': {'name': item.get('name'), 'arguments': item.get('arguments')}}
-            if messages and messages[-1].get('tool_calls') and messages[-1].get('content') is None:
-                messages[-1]['tool_calls'].append(call)
+            if messages and messages[-1].get('role') == 'assistant' and messages[-1].get('content') is None:
+                messages[-1].setdefault('tool_calls', []).append(call)
+                messages[-1].update(replay_fields(item))
             else:
-                messages.append({'role': 'assistant', 'content': None, 'tool_calls': [call]})
+                messages.append({'role': 'assistant', 'content': None, 'tool_calls': [call], **replay_fields(item)})
         elif kind == 'function_call_output':
             messages.append({'role': 'tool', 'tool_call_id': item.get('call_id'), 'content': text_content(item.get('output'))})
-        elif kind == 'reasoning' and not item.get('summary'):
-            continue  # Empty bookkeeping from a client; no hidden reasoning fabricated.
+        elif kind == 'reasoning':
+            # Retain provider-native summary/encrypted continuation items exactly.
+            messages.append({'role': 'assistant', 'content': None, 'reasoning': copy.deepcopy(item)})
         else:
             raise APIError(400, 'Unsupported Responses input item; only text/functions are implemented', 'unsupported_feature')
     tools = body.get('tools', [])
@@ -131,6 +136,12 @@ def to_chat(body, store):
 def build_response(body, completion):
     message = completion['message']
     output = []
+    metadata = replay_fields(message, status=502)
+    reasoning = metadata.get('reasoning')
+    if isinstance(reasoning, dict) and reasoning.get('type') == 'reasoning':
+        if not isinstance(reasoning.get('id'), str):
+            raise APIError(502, 'Upstream Responses reasoning item has no valid ID', 'invalid_replay_metadata')
+        output.append(copy.deepcopy(reasoning))
     for call in message.get('tool_calls', []):
         output.append({'id': 'fc_' + uuid.uuid4().hex, 'type': 'function_call', 'status': 'completed',
                        'call_id': call['id'], **call['function']})
@@ -144,7 +155,16 @@ def build_response(body, completion):
                        'content': parts})
     reason = completion['finish_reason']
     incomplete = reason in ('length', 'content_filter')
-    return {'id': 'resp_' + uuid.uuid4().hex, 'object': 'response', 'created_at': int(time.time()),
+    if output and metadata:
+        # Extra fields on the first assistant output item survive stateless replay.
+        target = next((item for item in output if item['type'] != 'reasoning'), None)
+        if target is not None:
+            target.update(copy.deepcopy(metadata))
+    if incomplete:
+        for item in output:
+            if item.get('type') == 'message':
+                item['status'] = 'incomplete'
+    response = {'id': 'resp_' + uuid.uuid4().hex, 'object': 'response', 'created_at': int(time.time()),
             'status': 'incomplete' if incomplete else 'completed', 'error': None,
             'incomplete_details': {'reason': 'max_output_tokens' if reason == 'length' else reason} if incomplete else None,
             'model': 'muse', 'output': output, 'usage': None, 'store': body.get('store', True),
@@ -152,6 +172,9 @@ def build_response(body, completion):
             'tools': body.get('tools', []), 'tool_choice': body.get('tool_choice', 'auto' if body.get('tools') else 'none'),
             'parallel_tool_calls': body.get('parallel_tool_calls', True), 'metadata': body.get('metadata', {}),
             'max_output_tokens': body.get('max_output_tokens'), 'text': body.get('text', {'format': {'type': 'text'}})}
+    if completion.get('incomplete_tool_calls'):
+        response['bridge_details'] = {'incomplete_tool_calls': completion['incomplete_tool_calls'], 'executable': False}
+    return response
 
 
 def events(response):
@@ -166,6 +189,10 @@ def events(response):
     yield event('response.created', response=initial)
     yield event('response.in_progress', response=initial)
     for index, item in enumerate(response['output']):
+        if item['type'] == 'reasoning':
+            yield event('response.output_item.added', output_index=index, item=item)
+            yield event('response.output_item.done', output_index=index, item=item)
+            continue
         opening = dict(item, status='in_progress')
         if item['type'] == 'function_call':
             opening['arguments'] = ''

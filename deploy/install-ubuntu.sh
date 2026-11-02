@@ -48,13 +48,13 @@ for target in "$app_dir" "$config_dir" "$unit_file" "$stage_root/var/lib/osas-br
         exit 1
     fi
 done
-for file in bridge.py chat_protocol.py responses_api.py muse_backend.py worker.py requirements.txt README.md MUSE_WORKER.md scripts/init_env.py deploy/osas-bridge.service; do
+for file in bridge.py chat_protocol.py model_contract.py responses_api.py muse_backend.py worker.py requirements.txt README.md MUSE_WORKER.md scripts/init_env.py deploy/osas-bridge.service; do
     [[ -f "$source_dir/$file" && ! -L "$source_dir/$file" ]] || { echo "Missing/invalid release file: $file" >&2; exit 1; }
 done
 
 install -d -m 0755 "$app_dir" "$(dirname -- "$unit_file")"
 install -d -m 0700 "$config_dir"
-install -m 0644 "$source_dir/bridge.py" "$source_dir/chat_protocol.py" "$source_dir/responses_api.py" "$source_dir/muse_backend.py" "$source_dir/worker.py" "$source_dir/requirements.txt" "$source_dir/README.md" "$source_dir/MUSE_WORKER.md" "$app_dir/"
+install -m 0644 "$source_dir/bridge.py" "$source_dir/chat_protocol.py" "$source_dir/model_contract.py" "$source_dir/responses_api.py" "$source_dir/muse_backend.py" "$source_dir/worker.py" "$source_dir/requirements.txt" "$source_dir/README.md" "$source_dir/MUSE_WORKER.md" "$app_dir/"
 "$python_bin" -m venv "$app_dir/.venv"
 "$app_dir/.venv/bin/python3" -m pip install --disable-pip-version-check -r "$app_dir/requirements.txt"
 # DynamicUser must be able to traverse/read the root-owned virtualenv.

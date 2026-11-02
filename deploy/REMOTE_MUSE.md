@@ -34,6 +34,10 @@ resmi Muse atau konversi langsung dari bonus token.
   Default tools memakai emulasi yang divalidasi; tool dieksekusi client.
   Lihat [TOOL_CALLING.md](../TOOL_CALLING.md). Token usage belum tersedia.
   Upstream mengimplementasikan koneksi Muse; osas tidak menebak endpoint internal Muse.
+- Replay reasoning dan token budget hanya diaktifkan dengan kontrak upstream
+  terverifikasi. Default adapter web ini tetap unknown/unsupported; request
+  budget/state yang tidak didukung ditolak sebelum generasi. Lihat
+  [MODEL_CONTRACT.md](../MODEL_CONTRACT.md), bukan mengisi context 1M berdasarkan alias.
 
 ## 1. Pasang bridge di VPS B
 

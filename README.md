@@ -37,11 +37,19 @@ Client agent / 9Router → HTTPS + user key → osas bridge
   mendukung protokol tools. Belum diverifikasi pada Muse. `disabled` menonaktifkan
   tools/structured output.
 - `/v1/capabilities` menjelaskan kemampuan dan batasan aktual.
+- Assistant `reasoning`/`provider_data` dipertahankan sebagai state opaque pada
+  input/output, SSE, dan histori Responses. Replay yang tidak didukung upstream
+  ditolak secara jelas; state tidak disisipkan ke teks prompt.
+- Context/output budget memakai profil upstream terverifikasi dan counter
+  otoritatif, bila tersedia. Default Muse web adapter tetap unknown; permintaan
+  budget yang tidak bisa dijamin ditolak, bukan diam-diam diabaikan.
 
 **Tool dieksekusi oleh client agent**, bukan oleh server bridge. Function seperti
 baca file, edit file, terminal, atau browser harus disediakan oleh client yang
 menggunakan API. Bridge tidak memberi model akses shell otomatis di VPS.
 Lihat [panduan lengkap tool calling](TOOL_CALLING.md) dan contoh agent siap jalan.
+Detail reasoning replay, profil model, dan error budget ada di
+[MODEL_CONTRACT.md](MODEL_CONTRACT.md).
 
 ## Jalankan lokal
 
@@ -112,8 +120,11 @@ membuka endpoint API yang diperlukan, tanpa meneruskan panel admin adapter.
   ditolak agar schema tidak mengakses jaringan; gunakan schema self-contained.
 - Tidak ada token count/usage palsu. Usage saat ini tidak tersedia (`null` pada
   Responses dan chunk include_usage); alias `muse` bukan bukti nama model dasar.
-- Temperature/token limits diteruskan sebagai petunjuk; penerapan persis oleh
-  Muse belum dijamin. Tidak ada automatic retry/repair yang diam-diam memakai kuota.
+- Temperature tetap petunjuk; token budget membutuhkan kontrak upstream yang
+  sudah diverifikasi. Muse web adapter saat ini belum memilikinya, sehingga
+  `max_tokens`/`max_completion_tokens` menghasilkan `output_limit_unsupported`
+  sampai upstream yang sesuai dikonfigurasi. Tidak ada automatic retry/repair
+  yang diam-diam memakai kuota.
 - Responses menyimpan histori secara default untuk chaining. Gunakan `store:false`
   untuk opt-out dan kirim ulang seluruh riwayat tool. TTL default 1 jam, maksimum
   128 respons tersimpan, lalu yang tertua dievikt. Hanya output yang lengkap dan

@@ -113,8 +113,9 @@ class ToolProtocolTests(unittest.TestCase):
             loads('{"a":NaN}')
         raw = {'message': {'content': envelope(ctx, {'type': 'tool_calls', 'calls': [
             {'name': 'add', 'arguments': {'a': 1, 'b': 2}}]})}, 'finish_reason': 'length'}
-        with self.assertRaises(APIError):
-            normalize_completion(raw, req, ctx)
+        truncated = normalize_completion(raw, req, ctx)
+        self.assertEqual(truncated['finish_reason'], 'length')
+        self.assertNotIn('tool_calls', truncated['message'])
 
     def test_native_mode_validates_args_and_keeps_call_ids(self):
         req = request(); wire, ctx = prepare_request(req, 'native')

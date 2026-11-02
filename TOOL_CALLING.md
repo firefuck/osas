@@ -161,7 +161,7 @@ Instalasi lama perlu dependencies dan file baru. Dari checkout terbaru di VPS:
    `python3-venv` harus tersedia. Direktori venv harus bisa dibaca service
    DynamicUser; jangan membuat config berisi key di venv tersebut.
 3. Stop service dan salin `bridge.py`, `chat_protocol.py`, `responses_api.py`,
-   `muse_backend.py`, dan `worker.py` ke `/opt/osas-bridge`.
+   `model_contract.py`, `muse_backend.py`, dan `worker.py` ke `/opt/osas-bridge`.
 4. Update unit dari `deploy/osas-bridge.service` (ExecStart sekarang memakai venv),
    jalankan daemon-reload lalu start service. Update route reverse proxy agar
    `/v1/responses`, `/v1/responses/{id}`, dan `/v1/capabilities` juga diteruskan.
@@ -173,3 +173,8 @@ computer use, custom grammar tools, gambar/audio, Responses background jobs,
 embeddings, dan seluruh API OpenAI lainnya belum diimplementasikan. Tool calling
 Muse nyata dan client 9Router/Codex pengguna belum dites; jangan menganggap SDK
 fixture test membuktikan model Muse akan selalu mematuhi protokol emulasi.
+
+Untuk reasoning/provider state dan batas context/output, lihat
+[MODEL_CONTRACT.md](MODEL_CONTRACT.md). Output terpotong mempertahankan `length`
+atau Responses `incomplete`, dengan tool yang belum lengkap tidak dapat dieksekusi.
+Budget pada upstream yang belum mendukungnya ditolak sebelum generasi.

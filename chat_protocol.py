@@ -15,6 +15,19 @@ class APIError(Exception):
         self.status, self.message, self.code = status, message, code
 
 
+REPLAY_FIELDS = ('reasoning', 'reasoning_content', 'reasoning_details', 'provider_data')
+
+
+def replay_fields(message, status=400):
+    """Copy JSON metadata exactly, without interpreting or exposing opaque state."""
+    result = {key: copy.deepcopy(message[key]) for key in REPLAY_FIELDS if key in message}
+    try:
+        dumps(result)
+    except (TypeError, ValueError, RecursionError):
+        raise APIError(status, 'Invalid provider reasoning/replay metadata', 'invalid_replay_metadata') from None
+    return result
+
+
 def loads(text):
     def invalid(_):
         raise ValueError('Non-finite JSON number')
@@ -169,6 +182,8 @@ def validate_request(body):
         if role == 'assistant' and content is None and isinstance(message.get('refusal'), str):
             content = message['refusal']
         item = {'role': role, 'content': content}
+        if role == 'assistant':
+            item.update(replay_fields(message))
         if role == 'tool':
             call_id = message.get('tool_call_id')
             if not isinstance(call_id, str) or call_id not in pending:
@@ -200,7 +215,7 @@ def validate_request(body):
                 seen.add(call_id)
             if calls:
                 item['tool_calls'] = copy.deepcopy(calls)
-            if content is None and not calls:
+            if content is None and not calls and not any(item.get(key) for key in REPLAY_FIELDS):
                 raise APIError(400, 'Assistant needs content or tool_calls')
         normalized.append(item)
     if pending:
@@ -228,6 +243,9 @@ def validate_request(body):
             elif name == 'temperature' and not 0 <= value <= 2 or name == 'top_p' and not 0 <= value <= 1:
                 raise APIError(400, f'Invalid {name} range')
             result[name] = value
+    if ('max_tokens' in result and 'max_completion_tokens' in result and
+            result['max_tokens'] != result['max_completion_tokens']):
+        raise APIError(400, 'max_tokens and max_completion_tokens must agree')
     return result
 
 
@@ -260,7 +278,9 @@ def prepare_request(request, mode='emulate'):
         if message['role'] == 'tool':
             messages.append({'role': 'user', 'content': dumps({'kind': 'tool_result', **message})})
         elif message.get('tool_calls'):
-            messages.append({'role': 'assistant', 'content': dumps({'kind': 'assistant_tool_calls', **message})})
+            public = {k: v for k, v in message.items() if k not in REPLAY_FIELDS}
+            messages.append({'role': 'assistant', 'content': dumps({'kind': 'assistant_tool_calls', **public}),
+                             **replay_fields(message)})
         else:
             messages.append(dict(message))
     wire['messages'] = messages
@@ -273,7 +293,20 @@ def normalize_completion(raw, request, context=None):
     if not isinstance(raw, dict) or not isinstance(raw.get('message'), dict):
         raise APIError(502, 'Invalid model response', 'invalid_model_output')
     message = copy.deepcopy(raw['message'])
+    metadata = replay_fields(message, status=502)
     reason = raw.get('finish_reason', 'stop')
+    if message.get('role', 'assistant') != 'assistant':
+        raise APIError(502, 'Invalid model completion role', 'invalid_model_output')
+    if reason == 'length':
+        # A cut tool envelope/JSON object is not an executable call. Preserve the
+        # truncation signal so the client can recover, without inventing a call ID.
+        partial = message.get('content')
+        calls = message.get('tool_calls')
+        result = {'message': {'role': 'assistant', 'content': partial if isinstance(partial, str) else '', **metadata},
+                  'finish_reason': 'length'}
+        if calls:
+            result['incomplete_tool_calls'] = copy.deepcopy(calls)
+        return result
     if context:
         content = message.get('content')
         start, end = f'<osas-{context["nonce"]}>', f'</osas-{context["nonce"]}>'
@@ -335,7 +368,7 @@ def normalize_completion(raw, request, context=None):
         if refusal is not None:
             if not isinstance(refusal, str):
                 raise APIError(502, 'Invalid refusal', 'invalid_model_output')
-            return {'message': {'role': 'assistant', 'content': message.get('content'), 'refusal': refusal},
+            return {'message': {'role': 'assistant', 'content': message.get('content'), 'refusal': refusal, **metadata},
                     'finish_reason': 'content_filter' if reason == 'content_filter' else 'stop'}
         if choice == 'required' or isinstance(choice, dict):
             raise APIError(502, 'Model did not call the required tool', 'invalid_model_output')
@@ -353,6 +386,7 @@ def normalize_completion(raw, request, context=None):
             if fmt['type'] == 'json_schema':
                 validate_value(value, fmt['json_schema']['schema'])
         message = {'role': 'assistant', 'content': content}
+    message.update(metadata)
     return {'message': message, 'finish_reason': reason}
 
 
@@ -361,6 +395,7 @@ def chat_chunks(response, include_usage=False):
     base['object'] = 'chat.completion.chunk'
     message = response['choices'][0]['message']
     deltas = [{'role': 'assistant'}]
+    deltas[0].update(replay_fields(message, status=502))
     if message.get('content') is not None:
         # Keep the first text delta compatible with clients expecting role+text.
         deltas[0]['content'] = message['content']
