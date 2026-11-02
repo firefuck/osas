@@ -1,0 +1,29 @@
+[Unit]
+Description=Osas Muse bridge for 9Router
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+WorkingDirectory=/opt/osas-bridge
+EnvironmentFile=/etc/osas-bridge/bridge.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 /opt/osas-bridge/bridge.py serve
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+StateDirectory=osas-bridge
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

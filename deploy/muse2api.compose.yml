@@ -1,0 +1,20 @@
+# Optional direct Muse adapter. Requires Docker Compose and separately cloned,
+# pinned upstream source in deploy/muse2api-src (see REMOTE_MUSE.md).
+services:
+  muse2api:
+    build:
+      context: ./muse2api-src
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:18610:18610"
+    environment:
+      MUSE2API_KEY: ${MUSE_UPSTREAM_KEY:?Set a private adapter key in the env file}
+      MUSE2API_CHAT_TIMEOUT: "230"
+      MUSE2API_CONCURRENCY: "1"
+      MUSE2API_REF_IMAGE_LOCAL_FILES: "0"
+      MUSE2API_REF_IMAGE_PRIVATE_FETCH: "0"
+    volumes:
+      - muse_state:/app/data
+    shm_size: '1gb'
+volumes:
+  muse_state:

@@ -1,0 +1,22 @@
+# Merge this site into an existing Caddy config. Replace muse.example.com.
+# DNS must point to the VPS; ports 80/443 must reach Caddy for automatic HTTPS.
+# Do not start Caddy alongside another service already using these ports.
+muse.example.com {
+    request_body {
+        max_size 1MB
+    }
+    # Includes chat/models so 9Router can run on another VPS. All API routes
+    # require their respective bearer keys in the bridge; only health is public.
+    @bridge path /worker/claim /worker/answer /health /v1/models /v1/chat/completions
+    handle @bridge {
+        reverse_proxy 127.0.0.1:8765 {
+            transport http {
+                max_conns_per_host 40
+                response_header_timeout 270s
+            }
+        }
+    }
+    handle {
+        respond "Not found" 404
+    }
+}

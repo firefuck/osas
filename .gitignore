@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.env
+.local/
+*.sqlite3*
+.venv/
+deploy/muse2api-src/
+*.private.json

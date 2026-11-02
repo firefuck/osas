@@ -1,0 +1,5 @@
+{
+  "server": "socks5://proxy.example.com:1080",
+  "username": "your-proxy-user",
+  "password": "your-proxy-password"
+}

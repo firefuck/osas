@@ -1,0 +1,38 @@
+# Standalone site config included from the nginx http block (e.g. conf.d/).
+# Replace muse.example.com everywhere and supply an existing valid certificate.
+# This file does not obtain a certificate. Do not replace your existing nginx.conf.
+limit_req_zone $binary_remote_addr zone=osas_worker:1m rate=2r/s;
+limit_conn_zone $binary_remote_addr zone=osas_connections:1m;
+
+server {
+    listen 80;
+    server_name muse.example.com;
+    return 301 https://muse.example.com$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name muse.example.com;
+    ssl_certificate /etc/letsencrypt/live/muse.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/muse.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    client_max_body_size 1m;
+    client_body_timeout 15s;
+
+    # Chat/models are included for 9Router on a separate VPS.
+    location ~ ^/(worker/(claim|answer)|health|v1/(models|chat/completions))$ {
+        limit_req zone=osas_worker burst=10 nodelay;
+        limit_req_status 429;
+        limit_conn osas_connections 16;
+        proxy_pass http://127.0.0.1:8765;
+        proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 270s;
+        proxy_send_timeout 30s;
+        proxy_buffering off;
+    }
+    location / {
+        return 404;
+    }
+}
